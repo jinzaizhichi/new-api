@@ -308,6 +308,28 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
+	// Code Assist 响应解包：/v1internal: 端点返回 {"response":{...}}，需要提取内层
+	isCodeAssist := strings.Contains(info.RequestURLPath, "/v1internal:")
+	if isCodeAssist && resp != nil && resp.Body != nil {
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr == nil {
+			// 尝试提取 "response" 字段
+			var envelope struct {
+				Response json.RawMessage `json:"response"`
+			}
+			if json.Unmarshal(bodyBytes, &envelope) == nil && len(envelope.Response) > 0 {
+				resp.Body = io.NopCloser(bytes.NewReader(envelope.Response))
+				// 更新 Content-Length
+				resp.ContentLength = int64(len(envelope.Response))
+				resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(envelope.Response)))
+			} else {
+				// 无 response 包装，回退原始内容
+				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			}
+		}
+	}
+
 	if info.RelayMode == constant.RelayModeGemini {
 		if strings.Contains(info.RequestURLPath, ":embedContent") ||
 			strings.Contains(info.RequestURLPath, ":batchEmbedContents") {
@@ -336,7 +358,6 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	} else {
 		return GeminiChatHandler(c, info, resp)
 	}
-
 }
 
 func (a *Adaptor) GetModelList() []string {

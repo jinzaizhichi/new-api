@@ -309,7 +309,12 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
 	// Code Assist 响应解包：/v1internal: 端点返回 {"response":{...}}，需要提取内层
-	isCodeAssist := strings.Contains(info.RequestURLPath, "/v1internal:")
+	ch, _ := model.GetChannelById(info.ChannelId, false)
+	var isCodeAssist bool
+	if ch != nil {
+		oauthInfo := GetOAuthInfoFromChannel(ch)
+		isCodeAssist = oauthInfo.IsCodeAssist()
+	}
 	if isCodeAssist && resp != nil && resp.Body != nil {
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()

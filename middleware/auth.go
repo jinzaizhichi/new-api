@@ -312,6 +312,7 @@ func TokenAuth() func(c *gin.Context) {
 			}
 		}
 		key := c.Request.Header.Get("Authorization")
+		rawAuthHeader := key // 调试：保存原始 Authorization header
 		parts := make([]string, 0)
 		if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
 			key = strings.TrimSpace(key[7:])
@@ -329,6 +330,16 @@ func TokenAuth() func(c *gin.Context) {
 			parts = strings.Split(key, "-")
 			key = parts[0]
 		}
+		// 调试：打印提取到的 key（只保留前8位和后4位用于安全）
+		keyPreview := key
+		if len(keyPreview) > 16 {
+			keyPreview = keyPreview[:8] + "..." + keyPreview[len(keyPreview)-4:]
+		}
+		rawLen := len(rawAuthHeader)
+		if rawLen > 60 {
+			rawLen = 60
+		}
+		common.SysLog(fmt.Sprintf("TokenAuth: path=%s, rawAuth=%s, extractedKey=%s", c.Request.URL.Path, rawAuthHeader[:rawLen], keyPreview))
 		token, err := model.ValidateUserToken(key)
 		if token != nil {
 			id := c.GetInt("id")

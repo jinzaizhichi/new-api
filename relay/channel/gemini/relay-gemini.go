@@ -212,6 +212,12 @@ func CovertOpenAI2Gemini(c *gin.Context, textRequest dto.GeneralOpenAIRequest, i
 	}
 
 	if maxTokens := textRequest.GetMaxTokens(); maxTokens > 0 {
+		// Gemini 3.x Pro 等思考模型会将大量 token 用于内部推理（常占 80%+），
+		// max_tokens 过低会导致文本输出被截断为空。设最低 4096 保证可用输出。
+		const minMaxOutputTokens = 4096
+		if maxTokens < minMaxOutputTokens {
+			maxTokens = minMaxOutputTokens
+		}
 		geminiRequest.GenerationConfig.MaxOutputTokens = common.GetPointer(maxTokens)
 	}
 

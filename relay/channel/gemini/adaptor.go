@@ -186,7 +186,7 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 				req.Set("Authorization", "Bearer "+accessToken)
 				return nil
 			}
-			common.SysLog("Gemini OAuth token 获取失败，回退到 API Key: %v", tokenErr)
+			common.SysLog(fmt.Sprintf("Gemini OAuth token 获取失败，回退到 API Key: %v", tokenErr))
 		}
 	}
 

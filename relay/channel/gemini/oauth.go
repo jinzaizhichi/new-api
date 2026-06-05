@@ -181,7 +181,7 @@ func BuildGeminiAuthURL(clientID, clientSecret, redirectURI, oauthType string) (
 	}
 
 	scopes := DefaultAIStudioScopes
-	if oauthType == "code_assist" || effectiveID == BuiltinOAuthClientID {
+	if oauthType == "code_assist" {
 		scopes = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
 	}
 

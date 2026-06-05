@@ -1,6 +1,8 @@
 package gemini
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -169,6 +171,21 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 			info.DisablePing = true
 		}
 	}
+
+	// Code Assist 模式：使用 /v1internal: 端点（需要 OAuth + project_id）
+	ch, chErr := model.GetChannelById(info.ChannelId, false)
+	if chErr == nil && ch != nil {
+		oauthInfo := GetOAuthInfoFromChannel(ch)
+		if oauthInfo.IsCodeAssist() {
+			// Code Assist 端点格式: /v1internal:generateContent 或 /v1internal:streamGenerateContent?alt=sse
+			codeAssistAction := "generateContent"
+			if info.IsStream {
+				codeAssistAction = "streamGenerateContent?alt=sse"
+			}
+			return fmt.Sprintf("%s/v1internal:%s", info.ChannelBaseUrl, codeAssistAction), nil
+		}
+	}
+
 	return fmt.Sprintf("%s/%s/models/%s:%s", info.ChannelBaseUrl, version, info.UpstreamModelName, action), nil
 }
 
@@ -184,6 +201,10 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 			accessToken, tokenErr := GetOrRefreshAccessToken(channel)
 			if tokenErr == nil && accessToken != "" {
 				req.Set("Authorization", "Bearer "+accessToken)
+				// Code Assist 模式需要模拟 Gemini CLI User-Agent
+				if oauthInfo.IsCodeAssist() {
+					req.Set("User-Agent", GeminiCLIUserAgent)
+				}
 				return nil
 			}
 			common.SysLog(fmt.Sprintf("Gemini OAuth token 获取失败，回退到 API Key: %v", tokenErr))
@@ -262,6 +283,27 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
+	// Code Assist 模式：包装请求体为 {model, project, request} 格式
+	ch, chErr := model.GetChannelById(info.ChannelId, false)
+	if chErr == nil && ch != nil {
+		oauthInfo := GetOAuthInfoFromChannel(ch)
+		if oauthInfo.IsCodeAssist() {
+			bodyBytes, readErr := io.ReadAll(requestBody)
+			if readErr != nil {
+				return nil, fmt.Errorf("读取请求体失败: %w", readErr)
+			}
+			wrapped := WrappedGeminiRequest{
+				Model:   info.UpstreamModelName,
+				Project: oauthInfo.ProjectID,
+				Request: json.RawMessage(bodyBytes),
+			}
+			wrappedBytes, marshalErr := json.Marshal(wrapped)
+			if marshalErr != nil {
+				return nil, fmt.Errorf("包装请求体失败: %w", marshalErr)
+			}
+			requestBody = bytes.NewReader(wrappedBytes)
+		}
+	}
 	return channel.DoApiRequest(a, c, info, requestBody)
 }
 

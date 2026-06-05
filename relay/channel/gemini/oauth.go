@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -38,6 +39,12 @@ const (
 
 	// Token 提前刷新时间（过期前 5 分钟）
 	TokenRefreshMargin = 5 * time.Minute
+
+	// Code Assist API 端点
+	CodeAssistBaseURL = "https://cloudcode-pa.googleapis.com"
+
+	// Gemini CLI User-Agent 模拟 Gemini CLI 请求头，确保与内部端点的兼容性
+	GeminiCLIUserAgent = "GeminiCLI/0.1.5 (Windows; AMD64)"
 )
 
 // GeminiOAuthInfo 存储在 channel.other_info 中的 OAuth 配置
@@ -49,6 +56,88 @@ type GeminiOAuthInfo struct {
 	AccessToken    string `json:"access_token"`
 	TokenExpiresAt int64  `json:"token_expires_at"` // Unix 时间戳
 	Scope          string `json:"scope"`
+	ProjectID      string `json:"project_id,omitempty"` // Code Assist 项目的 GCP project_id
+	TierID         string `json:"tier_id,omitempty"`    // Code Assist 订阅 tier ID
+}
+
+// IsCodeAssist 判断是否使用 Code Assist 端点
+func (o *GeminiOAuthInfo) IsCodeAssist() bool {
+	return o != nil && o.OAuthType == "code_assist" && o.ProjectID != ""
+}
+
+// ============================================
+// Code Assist LoadCodeAssist / OnboardUser 类型
+// ============================================
+
+type CodeAssistMetadata struct {
+	IDEType    string `json:"ideType"`
+	Platform   string `json:"platform"`
+	PluginType string `json:"pluginType"`
+}
+
+type LoadCodeAssistRequest struct {
+	Metadata CodeAssistMetadata `json:"metadata"`
+}
+
+type TierInfo struct {
+	ID string `json:"id"`
+}
+
+// UnmarshalJSON 兼容字符串和对象两种 tier 格式
+func (t *TierInfo) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	if data[0] == '"' {
+		var id string
+		if err := json.Unmarshal(data, &id); err != nil {
+			return err
+		}
+		t.ID = id
+		return nil
+	}
+	type alias TierInfo
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*t = TierInfo(decoded)
+	return nil
+}
+
+type LoadCodeAssistResponse struct {
+	CurrentTier             *TierInfo `json:"currentTier,omitempty"`
+	PaidTier                *TierInfo `json:"paidTier,omitempty"`
+	CloudAICompanionProject string    `json:"cloudaicompanionProject,omitempty"`
+	AllowedTiers            []struct {
+		ID        string `json:"id"`
+		IsDefault bool   `json:"isDefault,omitempty"`
+	} `json:"allowedTiers,omitempty"`
+}
+
+// GetTier 提取 tier ID，优先使用 paidTier
+func (r *LoadCodeAssistResponse) GetTier() string {
+	if r.PaidTier != nil && r.PaidTier.ID != "" {
+		return r.PaidTier.ID
+	}
+	if r.CurrentTier != nil {
+		return r.CurrentTier.ID
+	}
+	return ""
+}
+
+type OnboardUserRequest struct {
+	TierID   string             `json:"tierId"`
+	Metadata CodeAssistMetadata `json:"metadata"`
+}
+
+type OnboardUserResponse struct {
+	Done     bool   `json:"done"`
+	Name     string `json:"name,omitempty"`
+	Response *struct {
+		CloudAICompanionProject any `json:"cloudaicompanionProject,omitempty"`
+	} `json:"response,omitempty"`
 }
 
 // OAuthSession 浏览器授权流程中的临时会话
@@ -458,5 +547,162 @@ func GetOrRefreshAccessToken(channel *model.Channel) (string, error) {
 		}
 	}
 
+	// Code Assist 模式自动获取 project_id（懒加载：首次 API 调用时触发）
+	if oauthInfo.OAuthType == "code_assist" && oauthInfo.ProjectID == "" {
+		ctx := fmt.Sprintf("channel=%d", channel.Id)
+		common.SysLog(fmt.Sprintf("Code Assist project_id 为空，尝试自动获取... %s", ctx))
+		projectID, tierID, err := FetchProjectID(oauthInfo.AccessToken)
+		if err == nil && projectID != "" {
+			oauthInfo.ProjectID = projectID
+			oauthInfo.TierID = tierID
+			if saveErr := SaveOAuthInfoToChannel(channel, oauthInfo); saveErr != nil {
+				common.SysError(fmt.Sprintf("保存 Code Assist project_id 失败 %s: %v", ctx, saveErr))
+			} else {
+				common.SysLog(fmt.Sprintf("Code Assist project_id 已获取: %s, tier: %s %s", projectID, tierID, ctx))
+			}
+		} else {
+			common.SysLog(fmt.Sprintf("Code Assist project_id 自动获取失败 %s: %v", ctx, err))
+		}
+	}
+
 	return oauthInfo.AccessToken, nil
+}
+
+// ============================================
+// Code Assist: LoadCodeAssist / OnboardUser / FetchProjectID
+// ============================================
+
+// defaultCodeAssistMetadata 返回默认的 Code Assist 元数据
+func defaultCodeAssistMetadata() CodeAssistMetadata {
+	return CodeAssistMetadata{
+		IDEType:    "ANTIGRAVITY",
+		Platform:   "PLATFORM_UNSPECIFIED",
+		PluginType: "GEMINI",
+	}
+}
+
+// callCodeAssistAPI 调用 Code Assist 内部 API 的通用方法
+func callCodeAssistAPI(accessToken, path string, reqBody any, result any) error {
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("序列化请求体失败: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", CodeAssistBaseURL+path, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("创建请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("User-Agent", GeminiCLIUserAgent)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP 请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("读取响应失败: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// 截断错误响应体用于日志
+		sanitized := string(respBody)
+		if len(sanitized) > 500 {
+			sanitized = sanitized[:500] + "..."
+		}
+		return fmt.Errorf("Code Assist API 返回错误 (status=%d): %s", resp.StatusCode, sanitized)
+	}
+
+	if err := json.Unmarshal(respBody, result); err != nil {
+		return fmt.Errorf("解析响应失败: %w, body: %s", err, string(respBody))
+	}
+
+	return nil
+}
+
+// LoadCodeAssist 获取 Code Assist 的用户 tier 和项目信息
+func LoadCodeAssist(accessToken string) (*LoadCodeAssistResponse, error) {
+	req := &LoadCodeAssistRequest{Metadata: defaultCodeAssistMetadata()}
+	var result LoadCodeAssistResponse
+	if err := callCodeAssistAPI(accessToken, "/v1internal:loadCodeAssist", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// OnboardUser 为新用户注册 Code Assist 并获取 project_id
+func OnboardUser(accessToken, tierID string) (*OnboardUserResponse, error) {
+	if tierID == "" {
+		tierID = "LEGACY"
+	}
+	req := &OnboardUserRequest{
+		TierID:   tierID,
+		Metadata: defaultCodeAssistMetadata(),
+	}
+	var result OnboardUserResponse
+	if err := callCodeAssistAPI(accessToken, "/v1internal:onboardUser", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// FetchProjectID 获取 Code Assist 所需的 GCP project_id
+// 流程：LoadCodeAssist → 如果没返回 project_id 则 OnboardUser
+func FetchProjectID(accessToken string) (projectID string, tierID string, err error) {
+	// 第一步: LoadCodeAssist 获取 tier 和可能的 project_id
+	loadResp, loadErr := LoadCodeAssist(accessToken)
+
+	// 提取 tierID
+	tierID = "LEGACY"
+	if loadResp != nil {
+		if tier := loadResp.GetTier(); tier != "" {
+			tierID = tier
+		}
+	}
+
+	// 如果直接返回了 project_id，完成
+	if loadErr == nil && loadResp != nil && strings.TrimSpace(loadResp.CloudAICompanionProject) != "" {
+		return strings.TrimSpace(loadResp.CloudAICompanionProject), tierID, nil
+	}
+
+	// 已注册用户但没有 project_id — 尝试 OnboardUser
+	if loadResp != nil && loadResp.GetTier() != "" {
+		common.SysLog(fmt.Sprintf("Code Assist 用户已注册(tier=%s)但没有 project_id，尝试 OnboardUser...", tierID))
+	}
+
+	// 第二步: OnboardUser（最多重试 5 次）
+	const maxAttempts = 5
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		resp, onboardErr := OnboardUser(accessToken, tierID)
+		if onboardErr != nil {
+			return "", tierID, fmt.Errorf("OnboardUser 失败: %w", onboardErr)
+		}
+		if resp.Done {
+			if resp.Response != nil && resp.Response.CloudAICompanionProject != nil {
+				switch v := resp.Response.CloudAICompanionProject.(type) {
+				case string:
+					return strings.TrimSpace(v), tierID, nil
+				case map[string]any:
+					if id, ok := v["id"].(string); ok {
+						return strings.TrimSpace(id), tierID, nil
+					}
+				}
+			}
+			return "", tierID, fmt.Errorf("OnboardUser 完成但未返回 project_id")
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	return "", tierID, fmt.Errorf("OnboardUser 超时（%d 次尝试后仍未完成）", maxAttempts)
+}
+
+// WrappedGeminiRequest Code Assist 包装请求格式
+type WrappedGeminiRequest struct {
+	Model   string          `json:"model"`
+	Project string          `json:"project"`
+	Request json.RawMessage `json:"request"`
 }

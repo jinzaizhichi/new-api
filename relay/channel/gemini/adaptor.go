@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -172,6 +174,23 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *relaycommon.RelayInfo) error {
 	channel.SetupApiRequestHeader(info, c, req)
+
+	// 检查是否配置了 Gemini OAuth
+	channel, err := model.GetChannelById(info.ChannelId, false)
+	if err == nil && channel != nil {
+		oauthInfo := GetOAuthInfoFromChannel(channel)
+		if oauthInfo != nil {
+			// 获取有效 access_token（必要时自动刷新）
+			accessToken, tokenErr := GetOrRefreshAccessToken(channel)
+			if tokenErr == nil && accessToken != "" {
+				req.Set("Authorization", "Bearer "+accessToken)
+				return nil
+			}
+			common.SysLog("Gemini OAuth token 获取失败，回退到 API Key: %v", tokenErr)
+		}
+	}
+
+	// 默认：使用 API Key 认证
 	req.Set("x-goog-api-key", info.ApiKey)
 	return nil
 }

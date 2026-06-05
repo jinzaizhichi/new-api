@@ -266,6 +266,16 @@ func SetApiRouter(router *gin.Engine) {
 			channelRoute.POST("/upstream_updates/apply_all", controller.ApplyAllChannelUpstreamModelUpdates)
 			channelRoute.POST("/upstream_updates/detect", controller.DetectChannelUpstreamModelUpdates)
 			channelRoute.POST("/upstream_updates/detect_all", controller.DetectAllChannelUpstreamModelUpdates)
+
+		// Gemini OAuth 路由
+		geminiOAuthRoute := channelRoute.Group("/gemini/oauth")
+		{
+			geminiOAuthRoute.POST("/auth-url", controller.GenerateGeminiOAuthURL)
+			geminiOAuthRoute.POST("/exchange", controller.ExchangeGeminiOAuthCode)
+			geminiOAuthRoute.GET("/status", controller.GetGeminiOAuthStatus)
+			geminiOAuthRoute.POST("/refresh", controller.ForceRefreshGeminiOAuth)
+			geminiOAuthRoute.POST("/config", controller.SetGeminiOAuthConfig)
+		}
 		}
 		tokenRoute := apiRouter.Group("/token")
 		tokenRoute.Use(middleware.UserAuth())

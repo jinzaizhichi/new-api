@@ -324,6 +324,10 @@ func (channel *Channel) SetOtherInfo(otherInfo map[string]interface{}) {
 	channel.OtherInfo = string(otherInfoBytes)
 }
 
+func (channel *Channel) UpdateOtherInfo() error {
+	return DB.Model(channel).Update("other_info", channel.OtherInfo).Error
+}
+
 func (channel *Channel) GetTag() string {
 	if channel.Tag == nil {
 		return ""

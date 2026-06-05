@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -110,7 +111,7 @@ func ExchangeGeminiOAuthCode(c *gin.Context) {
 	// 交换 code 获取 token
 	oauthInfo, err := gemini.ExchangeGeminiCode(req.SessionID, req.State, req.Code)
 	if err != nil {
-		common.SysError(c, "Gemini OAuth code 交换失败: %v", err)
+		common.SysError(fmt.Sprintf("Gemini OAuth code 交换失败: %v", err))
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "OAuth 授权失败: " + err.Error(),
@@ -130,7 +131,7 @@ func ExchangeGeminiOAuthCode(c *gin.Context) {
 
 	// 保存 OAuth 信息到渠道
 	if err := gemini.SaveOAuthInfoToChannel(channel, oauthInfo); err != nil {
-		common.SysError(c, "保存 Gemini OAuth 信息失败: %v", err)
+		common.SysError(fmt.Sprintf("保存 Gemini OAuth 信息失败: %v", err))
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "保存 OAuth 配置失败: " + err.Error(),
